@@ -30,7 +30,6 @@ from data.load import load_region
 PROCESSED_DIR = Path(__file__).resolve().parent.parent / "data" / "processed"
 
 TIMEZONE = "Europe/Kyiv"
-HOUR_NS = 3_600_000_000_000  # 1 година в наносекундах
 
 
 def merge_intervals(df: pd.DataFrame) -> pd.DataFrame:
@@ -105,9 +104,10 @@ def _accumulate_minutes(
 ) -> np.ndarray:
     """Для кожної години сітки рахувати кількість хвилин, покритих тривогою.
 
-    Працює в абсолютному часі (UTC, наносекунди), щоб коректно обробляти
-    переходи літнього/зимового часу та уникнути неоднозначностей з
-    локальними позначками часу.
+    Усі обчислення виконуються через арифметику pd.Timestamp/pd.Timedelta
+    (а не через ручне переведення в наносекунди), бо внутрішня одиниця
+    зберігання datetime у pandas може відрізнятись між версіями
+    (ns/us/ms) — Timedelta-арифметика коректно враховує це сама.
 
     Параметри
     ---------
@@ -128,18 +128,19 @@ def _accumulate_minutes(
     if merged.empty or n_hours == 0:
         return alert_minutes
 
-    grid_ns = grid.tz_convert("UTC").asi8  # int64 нс від епохи
-    grid_start_ns = grid_ns[0]
+    grid_start = grid[0]
+    one_hour = pd.Timedelta(hours=1)
+    one_unit = pd.Timedelta(nanoseconds=1)
 
-    starts_ns = merged["started_at"].dt.tz_convert("UTC").astype("int64").to_numpy()
-    finishes_ns = merged["finished_at"].dt.tz_convert("UTC").astype("int64").to_numpy()
+    starts = merged["started_at"]
+    finishes = merged["finished_at"]
 
-    for start_ns, finish_ns in zip(starts_ns, finishes_ns):
-        idx_start = int((start_ns - grid_start_ns) // HOUR_NS)
-        # finish_ns належить наступній годині, якщо рівно на межі — беремо
-        # годину, що містить (finish_ns - 1 нс), бо інтервал напіввідкритий.
-        idx_end = int((finish_ns - 1 - grid_start_ns) // HOUR_NS)
+    idx_start_all = ((starts - grid_start) // one_hour).to_numpy(dtype=np.int64)
+    # finish належить наступній годині, якщо рівно на межі — беремо годину,
+    # що містить (finish - 1 одиниця), бо інтервал напіввідкритий [start, finish).
+    idx_end_all = (((finishes - one_unit) - grid_start) // one_hour).to_numpy(dtype=np.int64)
 
+    for start, finish, idx_start, idx_end in zip(starts, finishes, idx_start_all, idx_end_all):
         idx_start_clipped = max(idx_start, 0)
         idx_end_clipped = min(idx_end, n_hours - 1)
 
@@ -147,11 +148,11 @@ def _accumulate_minutes(
             continue  # інтервал повністю поза межами сітки
 
         for idx in range(idx_start_clipped, idx_end_clipped + 1):
-            bin_start_ns = grid_start_ns + idx * HOUR_NS
-            bin_end_ns = bin_start_ns + HOUR_NS
-            overlap_start = max(start_ns, bin_start_ns)
-            overlap_end = min(finish_ns, bin_end_ns)
-            minutes = (overlap_end - overlap_start) / 1e9 / 60
+            bin_start = grid_start + idx * one_hour
+            bin_end = bin_start + one_hour
+            overlap_start = max(start, bin_start)
+            overlap_end = min(finish, bin_end)
+            minutes = (overlap_end - overlap_start).total_seconds() / 60
             if minutes > 0:
                 alert_minutes[idx] += minutes
 
@@ -163,6 +164,12 @@ def _count_starts(grid: pd.DatetimeIndex, raw_intervals: pd.DataFrame) -> np.nda
 
     Лічильник будується на основі НЕзлитих інтервалів, бо злиття об'єднує
     кілька тривог в одну і втрачає інформацію про окремі початки.
+
+    Обчислення індексу години виконується через Timedelta-арифметику
+    (started_at - grid_start) // 1h, а не через ручне переведення у
+    наносекунди — внутрішня одиниця зберігання datetime у pandas може
+    відрізнятись між версіями (ns/us/ms), і Timedelta-арифметика коректно
+    враховує це сама.
     """
     n_hours = len(grid)
     n_starts = np.zeros(n_hours, dtype=int)
@@ -170,11 +177,10 @@ def _count_starts(grid: pd.DatetimeIndex, raw_intervals: pd.DataFrame) -> np.nda
     if raw_intervals.empty or n_hours == 0:
         return n_starts
 
-    grid_ns = grid.tz_convert("UTC").asi8
-    grid_start_ns = grid_ns[0]
-    starts_ns = raw_intervals["started_at"].dt.tz_convert("UTC").astype("int64").to_numpy()
+    grid_start = grid[0]
+    one_hour = pd.Timedelta(hours=1)
 
-    idx = ((starts_ns - grid_start_ns) // HOUR_NS).astype(int)
+    idx = ((raw_intervals["started_at"] - grid_start) // one_hour).to_numpy(dtype=np.int64)
     valid = (idx >= 0) & (idx < n_hours)
     np.add.at(n_starts, idx[valid], 1)
 
