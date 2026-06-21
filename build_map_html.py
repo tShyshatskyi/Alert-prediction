@@ -118,12 +118,11 @@ const LOCS=FIG.data[0].locations,CUST=FIG.data[0].customdata;FIG.data[0].geojson
 const DARK={paper_bgcolor:"rgba(0,0,0,0)",plot_bgcolor:"rgba(0,0,0,0)",font:{color:"#cbd5e1",size:11},
  margin:{l:46,r:12,t:8,b:34},height:240,legend:{orientation:"h",y:1.25,font:{size:10}}};
 const CFG={displayModeBar:false,responsive:true};
-Plotly.newPlot('map',FIG.data,FIG.layout,{responsive:true,displayModeBar:false});
 let selected=__DEFAULT__.slice();
-document.getElementById('map').on('plotly_click',e=>{const nm=e.points[0].customdata;
- if(!nm||!MAP_DATA[nm])return;const i=selected.indexOf(nm);if(i>=0)selected.splice(i,1);else selected.push(nm);
- if(selected.length>6)selected.shift();render();});
 function clearSel(){selected=[];render();}
+function onMapClick(e){const nm=e.points[0].customdata;
+ if(!nm||!MAP_DATA[nm])return;const i=selected.indexOf(nm);if(i>=0)selected.splice(i,1);else selected.push(nm);
+ if(selected.length>6)selected.shift();render();}
 function colorOf(nm){return PAL[selected.indexOf(nm)%PAL.length];}
 function rm(nm){const i=selected.indexOf(nm);if(i>=0)selected.splice(i,1);render();}
 function lines(acc,x){return selected.map(nm=>({x:x||[...Array(24).keys()],y:acc(MAP_DATA[nm]),mode:'lines',
@@ -179,7 +178,7 @@ function render(){
  else fc=selected.map(nm=>({x:MAP_DATA[nm].fc_dates,y:MAP_DATA[nm].fc_point,mode:'lines',name:MAP_DATA[nm].label,line:{color:colorOf(nm),width:2}}));
  Plotly.newPlot('forecast',fc,{...DARK,yaxis:{title:'год/добу',range:[0,24]}},CFG);
 }
-render();
+Plotly.newPlot('map',FIG.data,FIG.layout,{responsive:true,displayModeBar:false}).then(gd=>{gd.on('plotly_click',onMapClick);render();});
 </script></body></html>"""
 html=(TPL.replace("__GEO__",json.dumps(geo,separators=(",",":")))
         .replace("__FIG__",json.dumps(fig))
