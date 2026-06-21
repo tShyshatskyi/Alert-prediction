@@ -20,7 +20,7 @@ evaluated honestly against simple baselines.
 
 ## Interactive dashboard
 
-A self-contained `index.html` (alert data + Ukraine GeoJSON embedded, Plotly via CDN), hosted
+A self-contained `index.html`(currently only on PC) (alert data + Ukraine GeoJSON embedded, Plotly via CDN), hosted
 on GitHub Pages. Click oblasts on the map to compare several at once:
 
 - **Statistics:** probability by hour-of-day, by day-of-week, daily share over the full period,
