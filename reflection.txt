@@ -1,32 +1,23 @@
-REFLECTION (base draft — to be finished in my own words)
+REFLECTION
 
 What went wrong.
-My first attempts kept hitting environment and data traps rather than modeling
-problems. Files looked "corrupted" (in fact PyCharm's large-file display limit,
-and separately a removed pandas API, offset.delta). AI-generated code shipped a
-silent synthetic-data fallback that could have faked results, and a persistence
-baseline that turned out worse than a trivial constant. Most importantly,
-Nikopol's dramatic "rising trend" was partly an artifact: early oblast-level
-alerts were being filtered out.
+Most early failures were environment and data traps, not modeling. Files looked "corrupted"
+(a PyCharm large-file display limit, then a removed pandas API, offset.delta); AI-generated code
+shipped a silent synthetic-data fallback and a persistence baseline that was worse than a trivial
+constant. Two data issues mattered most: Nikopol's dramatic "rising trend" was partly an artifact
+of the alerting granularity changing over time, and each region's series ended at that region's
+last alert, which shifted forecasts into the past for quiet regions.
 
 How I adjusted.
-I stopped trusting outputs at face value and verified every step independently —
-recomputing metrics, inspecting raw bytes, and benchmarking baselines against
-trivial constants. I fixed the pandas call, removed the synthetic fallback,
-added honest baselines, and corrected the Nikopol filter to include oblast-level
-alerts. I also wrongly blamed Python 3.14 at one point and corrected myself once
-the real cause (a library API change) was found.
+I stopped trusting outputs at face value and verified every step independently — recomputing
+metrics, inspecting raw bytes, and benchmarking against trivial constants. I then fixed the pandas
+call, removed the synthetic fallback, corrected the Nikopol filter to include oblast-level alerts,
+and anchored every series to a common "now."
 
 Why the final version is better.
-It is leakage-free (rolling, time-based backtest), grounded in corrected data,
-and benchmarked against honest baselines — so its conclusions (Nikopol
-predictable, Kyiv largely not, no single method dominating) are trustworthy
-rather than flattering.
+It is leakage-free (rolling, time-based backtest), built on corrected data, and benchmarked against
+honest baselines — so its conclusions (frontline regions predictable, Kyiv largely not, no single
+method dominating) are trustworthy rather than flattering. The clearest next step: predict actual
+shelling, not just the precautionary alert, by fusing alerts with intelligence, OSINT and media.
 
-Limitation / what I would do next.
-A binary "alert" is a coarse, precautionary signal — not an actual strike.
-Predicting real shelling would be far more meaningful and far harder: it would
-mean fusing alerts with other correlating signals (intelligence reports, OSINT,
-media statements, launch/telemetry data) rather than the siren feed alone.
-
-[~210 words — trim to ~100 for submission, keep the parts that feel most yours.]
+[~190 words — trim to ~100 for submission; keep the parts that feel most yours.]
