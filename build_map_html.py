@@ -25,21 +25,27 @@ LABEL={"Cherkaska oblast":"Черкаська","Chernihivska oblast":"Черні
  "Vinnytska oblast":"Вінницька","Volynska oblast":"Волинська","Zakarpatska oblast":"Закарпатська","Zaporizka oblast":"Запорізька","Zhytomyrska oblast":"Житомирська"}
 
 shapes=[f["properties"]["shapeName"] for f in geo["features"]]
-locations,z,custom,hover=[],[],[],[]
+d_loc,d_z,d_cd,d_hov=[],[],[],[]
+n_loc,n_cd,n_hov=[],[],[]
 for s in shapes:
-    nm=SHAPE2NAME.get(s); locations.append(s)
+    nm=SHAPE2NAME.get(s)
     if nm and data.get(nm,{}).get("status")=="ok":
-        rr=data[nm]["recent_rate"]; z.append(rr); custom.append(nm)
-        hover.append(f"<b>{LABEL[nm]}</b><br>тривога будь-де в області (14д): {rr*100:.0f}%<extra></extra>")
+        rr=data[nm]["recent_rate"]; d_loc.append(s); d_z.append(rr); d_cd.append(nm)
+        d_hov.append(f"<b>{LABEL[nm]}</b><br>тривога будь-де в області (14д): {rr*100:.0f}%<extra></extra>")
     else:
-        z.append(None); custom.append(nm or "")
-        hover.append(f"<b>{LABEL.get(nm,s)}</b><br>немає даних (постійна тривога / окуповано)<extra></extra>")
+        n_loc.append(s); n_cd.append(nm or "")
+        n_hov.append(f"<b>{LABEL.get(nm,s)}</b><br>немає даних (постійна тривога / окуповано)<extra></extra>")
 
-fig={"data":[{"type":"choroplethmapbox","locations":locations,"z":z,"customdata":custom,
-  "featureidkey":"properties.shapeName","colorscale":"YlOrRd","zmin":0,"zmax":1,"hovertemplate":hover,
-  "marker":{"line":{"color":"#0d141c","width":0.6},"opacity":0.85},
-  "colorbar":{"title":{"text":"Тривога будь-де<br>в області (14 дн.)","font":{"color":"#cbd5e1","size":11}},
-    "tickfont":{"color":"#9fb3c8"},"tickformat":".0%","outlinewidth":0,"len":0.75,"x":0.98}}],
+fig={"data":[
+  {"type":"choroplethmapbox","locations":d_loc,"z":d_z,"customdata":d_cd,
+   "featureidkey":"properties.shapeName","colorscale":"YlOrRd","zmin":0,"zmax":1,"hovertemplate":d_hov,
+   "marker":{"line":{"color":"#0d141c","width":0.6},"opacity":0.85},
+   "colorbar":{"title":{"text":"Тривога будь-де<br>в області (14 дн.)","font":{"color":"#cbd5e1","size":11}},
+     "tickfont":{"color":"#9fb3c8"},"tickformat":".0%","outlinewidth":0,"len":0.75,"x":0.98}},
+  {"type":"choroplethmapbox","locations":n_loc,"z":[0]*len(n_loc),"customdata":n_cd,
+   "featureidkey":"properties.shapeName","colorscale":[[0,"#454f5b"],[1,"#454f5b"]],"showscale":False,
+   "hovertemplate":n_hov,"marker":{"line":{"color":"#0d141c","width":0.6},"opacity":0.6}}
+ ],
  "layout":{"mapbox":{"style":"carto-darkmatter","center":{"lat":48.45,"lon":31.3},"zoom":4.3},
    "paper_bgcolor":"rgba(0,0,0,0)","margin":{"l":0,"r":0,"t":0,"b":0},"height":560}}
 
@@ -114,7 +120,7 @@ tr.best td{color:#ffd27d;font-weight:700}
 const GEOJSON=__GEO__,FIG=__FIG__,MAP_DATA=__DATA__;
 const PAL=["#ff8c3c","#4ea1ff","#52d273","#e36bd0","#f2d24b","#9b8cff"];
 const DOW=["Пн","Вт","Ср","Чт","Пт","Сб","Нд"];
-const LOCS=FIG.data[0].locations,CUST=FIG.data[0].customdata;FIG.data[0].geojson=GEOJSON;
+const LOCS=FIG.data[0].locations,CUST=FIG.data[0].customdata;FIG.data.forEach(t=>t.geojson=GEOJSON);
 const DARK={paper_bgcolor:"rgba(0,0,0,0)",plot_bgcolor:"rgba(0,0,0,0)",font:{color:"#cbd5e1",size:11},
  margin:{l:46,r:12,t:8,b:34},height:240,legend:{orientation:"h",y:1.25,font:{size:10}}};
 const CFG={displayModeBar:false,responsive:true};
@@ -138,7 +144,7 @@ function matrix(btKey,metric,better,dg){
  return `<table>${head}${rows}</table>`;}
 function render(){
  const w=LOCS.map((l,i)=>selected.includes(CUST[i])?2.6:0.6);
- Plotly.restyle('map',{'marker.line.width':[w],'marker.line.color':[LOCS.map((l,i)=>selected.includes(CUST[i])?'#fff':'#0d141c')]});
+ Plotly.restyle('map',{'marker.line.width':[w],'marker.line.color':[LOCS.map((l,i)=>selected.includes(CUST[i])?'#fff':'#0d141c')]},[0]);
  document.getElementById('chips').innerHTML=selected.length?selected.map(nm=>
    `<span class="chip" style="border-color:${colorOf(nm)}" onclick="rm('${nm}')">${MAP_DATA[nm].label}<b>×</b></span>`).join('')
    :'<span class="hint">Нічого не обрано — натисніть область на мапі.</span>';
