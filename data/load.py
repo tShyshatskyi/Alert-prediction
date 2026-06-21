@@ -83,10 +83,13 @@ def _filter_nikopol(df: pd.DataFrame) -> pd.Series:
     тривогою рівня "hromada" саме для громади Нікополя. Інші громади
     цього ж району (напр. Marhanets) виключаються свідомо.
     """
-    in_raion = (df["oblast"] == "Dnipropetrovska oblast") & (df["raion"] == "Nikopolskyi raion")
+    in_oblast = df["oblast"] == "Dnipropetrovska oblast"
+    # тривога на ВСЮ область теж покриває Нікополь (так писали майже всі тривоги 2022-2025)
+    is_oblast_level = df["level"] == "oblast"
+    in_raion = in_oblast & (df["raion"] == "Nikopolskyi raion")
     is_raion_level = df["level"] == "raion"
     is_nikopol_hromada = df["hromada"] == NIKOPOL_HROMADA_NAME
-    return in_raion & (is_raion_level | is_nikopol_hromada)
+    return (in_oblast & is_oblast_level) | (in_raion & (is_raion_level | is_nikopol_hromada))
 
 
 REGIONS: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {

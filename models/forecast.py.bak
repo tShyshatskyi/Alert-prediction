@@ -1,0 +1,296 @@
+"""
+models/forecast.py
+Прогноз тривог НАПЕРЕД (без жодних майбутніх спостережень) на кілька
+горизонтів (1/7/14/30 днів) — погодинна ймовірність + добовий діапазон.
+
+ВАЖЛИВО — чесність прогнозу:
+  Майбутніх даних не існує за визначенням, тож це НЕ бектест і тут немає
+  test-періоду для оцінки точності. Усі методи нижче лише ЕКСТРАПОЛЮЮТЬ
+  поточний рівень/паттерн вперед:
+    - погодинна ймовірність = історичний "профіль ризику" (година доби ×
+      день тижня) за ВСІЄЮ історією, масштабований останнім 14-денним
+      рівнем активності;
+    - добове навантаження = SARIMA (фолбек ExponentialSmoothing) і
+      рекурсивний ML, навчені на ВСІЙ наявній історії — тут немає
+      leakage, бо прогнозований період ще не настав і просто відсутній
+      у даних.
+  Припущення моделей: поточний режим (інтенсивність, сезонність)
+  залишається приблизно сталим. Чим більший горизонт H, тим більша
+  невизначеність — довірчий інтервал SARIMA має РОСТИ з H (перевіряється
+  у самоперевірці нижче). Це НЕ ворожіння на майбутні події (нові хвилі
+  обстрілів, зміни фронту тощо) — лише статистична екстраполяція.
+
+Запуск: і `python models/forecast.py`, і `python -m models.forecast`
+(з кореня проєкту Alert-prediction/).
+"""
+
+from __future__ import annotations
+
+import sys
+import pathlib
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+import warnings
+from typing import Dict, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+from preprocess.build_grid import build_hourly_grid
+from models.classical import build_daily_series
+from models.ml import MLRegressorDaily
+
+TARGET_COL = "alert_active"
+RECENT_WINDOW_DAYS = 14
+REPORTS_DIR = pathlib.Path(__file__).resolve().parent.parent / "reports"
+CONF_ALPHA = 0.2  # 80% довірчий інтервал
+
+
+# ---------------------------------------------------------------------------
+# Погодинна ймовірність: профіль ризику × останній рівень активності
+# ---------------------------------------------------------------------------
+
+def _climatology_shape(hourly: pd.DataFrame, target_col: str = TARGET_COL) -> Tuple[pd.Series, float]:
+    """Історичний профіль ризику за (година доби, день тижня) на ВСІЙ
+    історії. Тут немає train/test: прогнозований період ще не настав і
+    просто відсутній у даних, тож зазирання в майбутнє неможливе за
+    визначенням."""
+    hour = hourly.index.hour
+    dow = hourly.index.dayofweek
+    clim = hourly[target_col].groupby([hour, dow]).mean()
+    clim.index.names = ["hour", "dow"]
+    clim_mean = float(clim.mean())
+    shape = clim / clim_mean
+    return shape, clim_mean
+
+
+def _recent_rate(
+    hourly: pd.DataFrame, target_col: str = TARGET_COL, window_days: int = RECENT_WINDOW_DAYS
+) -> float:
+    """Середній alert_active за останні window_days днів історії —
+    "поточний рівень" активності, яким масштабується профіль ризику."""
+    cutoff = hourly.index.max() - pd.Timedelta(days=window_days)
+    recent = hourly.loc[hourly.index > cutoff, target_col]
+    if len(recent) == 0:
+        recent = hourly[target_col]
+    return float(recent.mean())
+
+
+def _hourly_probabilities(
+    hourly: pd.DataFrame, shape: pd.Series, recent_rate: float, horizon_days: int
+) -> pd.Series:
+    """prob[t] = clip(shape[hour(t), dow(t)] * recent_rate, 0, 1) для
+    майбутнього погодинного індексу на horizon_days днів наперед,
+    починаючи з наступної години після кінця історії."""
+    start = hourly.index.max() + pd.Timedelta(hours=1)
+    future_idx = pd.date_range(start, periods=horizon_days * 24, freq="h", tz=hourly.index.tz)
+
+    global_fallback = 1.0  # shape має середнє ~1.0 за визначенням
+    keys = list(zip(future_idx.hour, future_idx.dayofweek))
+    values = [shape.get(k, global_fallback) * recent_rate for k in keys]
+
+    prob = pd.Series(values, index=future_idx, name="alert_probability", dtype=float)
+    return prob.clip(0.0, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Добове навантаження: SARIMA (+80% інтервал) з фолбеком на ETS
+# ---------------------------------------------------------------------------
+
+def _sarima_or_ets_forecast(
+    daily: pd.Series, horizon_days: int, alpha: float = CONF_ALPHA
+) -> Tuple[pd.Series, pd.Series, pd.Series, str, bool]:
+    """SARIMA на ВСІЙ історії daily; фолбек на ExponentialSmoothing (лише
+    точковий прогноз — без інтервалу), якщо SARIMA впала/не зійшлась.
+
+    Повертає (point, low, high, model_name, used_fallback). Для фолбеку
+    low == high == point (чесно зазначаємо: довірчого інтервалу нема).
+    """
+    future_idx = pd.date_range(
+        daily.index.max() + pd.Timedelta(days=1), periods=horizon_days, freq="D"
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            model = SARIMAX(
+                daily,
+                order=(1, 1, 1),
+                seasonal_order=(1, 0, 1, 7),
+                enforce_stationarity=False,
+                enforce_invertibility=False,
+            )
+            fitted = model.fit(disp=False)
+            res = fitted.get_forecast(steps=horizon_days)
+
+            point = res.predicted_mean
+            conf = res.conf_int(alpha=alpha)
+            low, high = conf.iloc[:, 0], conf.iloc[:, 1]
+
+            point.index = future_idx
+            low.index = future_idx
+            high.index = future_idx
+
+            point = point.clip(lower=0, upper=24)
+            low = low.clip(lower=0, upper=24)
+            high = high.clip(lower=0, upper=24)
+            # перестрахування: clip на межах [0,24] теоретично може звести
+            # low/high "не туди" відносно point — гарантуємо low<=point<=high
+            low = pd.Series(np.minimum(low.values, point.values), index=future_idx)
+            high = pd.Series(np.maximum(high.values, point.values), index=future_idx)
+
+            return point, low, high, "SARIMA(1,1,1)x(1,0,1,7)", False
+        except Exception as e:
+            print(
+                f"[WARN] SARIMA не зійшлась ({e!r}); фолбек на ExponentialSmoothing "
+                "(точковий прогноз, без довірчого інтервалу).",
+                file=sys.stderr,
+            )
+
+        ets = ExponentialSmoothing(daily, trend="add", seasonal="add", seasonal_periods=7).fit()
+        point = ets.forecast(horizon_days)
+        point.index = future_idx
+        point = point.clip(lower=0, upper=24)
+        low = point.copy()
+        high = point.copy()
+        return point, low, high, "ExponentialSmoothing(add,add,7)", True
+
+
+# ---------------------------------------------------------------------------
+# Прогін по регіону
+# ---------------------------------------------------------------------------
+
+def forecast_region(region: str, horizons: Sequence[int] = (1, 7, 14, 30)) -> Dict[int, dict]:
+    hourly = build_hourly_grid(region)
+    daily = build_daily_series(region)
+
+    shape, _ = _climatology_shape(hourly)
+    recent_rate = _recent_rate(hourly)
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    results: Dict[int, dict] = {}
+
+    for H in horizons:
+        prob = _hourly_probabilities(hourly, shape, recent_rate, H)
+        point, low, high, model_name, used_fallback = _sarima_or_ets_forecast(daily, H)
+
+        ml = MLRegressorDaily().fit(daily)
+        ml_fc = ml.forecast(H)
+        ml_fc.index = point.index  # та сама послідовність дат, що й у SARIMA
+
+        hourly_csv = REPORTS_DIR / f"forecast_{region}_{H}d_hourly.csv"
+        prob_df = prob.to_frame()
+        prob_df.index.name = "timestamp"
+        prob_df.to_csv(hourly_csv)
+
+        daily_csv = REPORTS_DIR / f"forecast_{region}_{H}d_daily.csv"
+        daily_df = pd.DataFrame(
+            {
+                "sarima": point.values,
+                "sarima_low": low.values,
+                "sarima_high": high.values,
+                "ml": ml_fc.values,
+            },
+            index=point.index,
+        )
+        daily_df.index.name = "date"
+        daily_df.to_csv(daily_csv)
+
+        results[H] = {
+            "hourly_prob": prob,
+            "sarima_point": point,
+            "sarima_low": low,
+            "sarima_high": high,
+            "ml": ml_fc,
+            "model_name": model_name,
+            "used_fallback": used_fallback,
+            "hourly_csv": hourly_csv,
+            "daily_csv": daily_csv,
+        }
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Зведення та самоперевірка
+# ---------------------------------------------------------------------------
+
+def print_summary(region: str, results: Dict[int, dict]) -> None:
+    print(f"\n========== {region} ==========")
+    for H in sorted(results):
+        res = results[H]
+        prob = res["hourly_prob"]
+        point = res["sarima_point"]
+        low, high = res["sarima_low"], res["sarima_high"]
+
+        mean_prob = float(prob.mean())
+        expected_hours_prob = float(prob.sum())
+        expected_hours_sarima = float(point.sum())
+
+        hourly_risk = prob.groupby(prob.index.hour).mean().sort_values(ascending=False)
+        top5 = hourly_risk.head(5)
+
+        fallback_note = " (фолбек ETS — без інтервалу)" if res["used_fallback"] else ""
+        print(f"\n--- горизонт {H} дн. ({res['model_name']}{fallback_note}) ---")
+        print(f"Середня погодинна ймовірність тривоги: {mean_prob:.3f}")
+        print("ТОП-5 найризикованіших годин доби (профіль × останній 14-денний рівень):")
+        for hour, val in top5.items():
+            print(f"   {int(hour):02d}:00 -> {val:.3f}")
+        print(f"Очікувано 'годин тривог' за {H} дн. (сума погодинних ймовірностей): {expected_hours_prob:.1f}")
+        print(f"Очікувано 'годин тривог' за {H} дн. (сума добового SARIMA-навантаження): {expected_hours_sarima:.1f}")
+        rel_diff = abs(expected_hours_prob - expected_hours_sarima) / max(expected_hours_sarima, 1e-6)
+        print(f"Відносна різниця між двома оцінками: {rel_diff:.1%}")
+        print(
+            f"Інтервал SARIMA (80%) на останній день горизонту: "
+            f"[{low.iloc[-1]:.2f}; {high.iloc[-1]:.2f}], ширина={high.iloc[-1] - low.iloc[-1]:.2f}"
+        )
+        print(f"Збережено: {res['hourly_csv'].name}, {res['daily_csv'].name}")
+
+
+def self_check(region: str, results: Dict[int, dict]) -> None:
+    widths = {}
+    for H, res in results.items():
+        prob = res["hourly_prob"]
+        point, low, high = res["sarima_point"], res["sarima_low"], res["sarima_high"]
+
+        assert prob.between(0, 1).all(), f"{region}/{H}d: погодинні ймовірності вийшли за межі [0,1]"
+        assert point.between(0, 24).all(), f"{region}/{H}d: добове навантаження SARIMA вийшло за межі [0,24]"
+        assert (low <= point + 1e-9).all() and (point <= high + 1e-9).all(), (
+            f"{region}/{H}d: порушено sarima_low <= point <= sarima_high"
+        )
+        widths[H] = float((high - low).mean())
+
+    sorted_H = sorted(widths)
+    increasing = all(
+        widths[sorted_H[i]] <= widths[sorted_H[i + 1]] + 1e-6 for i in range(len(sorted_H) - 1)
+    )
+    print(
+        f"\n{region}: середня ширина 80%-інтервалу SARIMA за горизонтом: "
+        + ", ".join(f"{h}d={widths[h]:.2f}" for h in sorted_H)
+    )
+    if increasing:
+        print(f"OK ({region}): ширина довірчого інтервалу не зменшується з горизонтом, як і очікується.")
+    else:
+        print(f"[WARN] ({region}): ширина інтервалу НЕ монотонно зростає з горизонтом — перевір модель/дані.")
+
+    for H in sorted(results):
+        res = results[H]
+        prob_sum = float(res["hourly_prob"].sum())
+        sarima_sum = float(res["sarima_point"].sum())
+        rel_diff = abs(prob_sum - sarima_sum) / max(sarima_sum, 1e-6)
+        status = "OK" if rel_diff <= 0.5 else "[WARN]"
+        print(
+            f"{status} ({region}, {H}d): сума погодинних ймовірностей={prob_sum:.1f} "
+            f"vs сума SARIMA-навантаження={sarima_sum:.1f} (відн. різниця={rel_diff:.1%})"
+        )
+
+
+if __name__ == "__main__":
+    for region in ["kyiv", "nikopol"]:
+        region_results = forecast_region(region, horizons=(1, 7, 14, 30))
+        print_summary(region, region_results)
+        self_check(region, region_results)

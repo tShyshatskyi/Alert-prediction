@@ -1,0 +1,32 @@
+REFLECTION (base draft — to be finished in my own words)
+
+What went wrong.
+My first attempts kept hitting environment and data traps rather than modeling
+problems. Files looked "corrupted" (in fact PyCharm's large-file display limit,
+and separately a removed pandas API, offset.delta). AI-generated code shipped a
+silent synthetic-data fallback that could have faked results, and a persistence
+baseline that turned out worse than a trivial constant. Most importantly,
+Nikopol's dramatic "rising trend" was partly an artifact: early oblast-level
+alerts were being filtered out.
+
+How I adjusted.
+I stopped trusting outputs at face value and verified every step independently —
+recomputing metrics, inspecting raw bytes, and benchmarking baselines against
+trivial constants. I fixed the pandas call, removed the synthetic fallback,
+added honest baselines, and corrected the Nikopol filter to include oblast-level
+alerts. I also wrongly blamed Python 3.14 at one point and corrected myself once
+the real cause (a library API change) was found.
+
+Why the final version is better.
+It is leakage-free (rolling, time-based backtest), grounded in corrected data,
+and benchmarked against honest baselines — so its conclusions (Nikopol
+predictable, Kyiv largely not, no single method dominating) are trustworthy
+rather than flattering.
+
+Limitation / what I would do next.
+A binary "alert" is a coarse, precautionary signal — not an actual strike.
+Predicting real shelling would be far more meaningful and far harder: it would
+mean fusing alerts with other correlating signals (intelligence reports, OSINT,
+media statements, launch/telemetry data) rather than the siren feed alone.
+
+[~210 words — trim to ~100 for submission, keep the parts that feel most yours.]
